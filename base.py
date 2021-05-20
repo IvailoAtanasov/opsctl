@@ -4,7 +4,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 
-engine = create_engine('postgresql://postgres:QXAHgFNZE9J52Tgi@lxinfra02:5432/patchman')
+engine = create_engine('postgresql://postgres:<>')
 
 # reflect the tables
 Base = automap_base()
