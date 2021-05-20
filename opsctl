@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+#pylint: disable=no-value-for-parameter
+import xmlrpc.client
+import smtools
+import argparse
+import sys
+from argparse import RawTextHelpFormatter
+sys.path.append(smtools.configsm['dirs']['script_path'])
+sys.path.insert(1, '/opt/susemgr-scripts/suse-mgr-pkg')
+from base import Session
+from sqlalchemy import MetaData
+from base import Server
+from base import Package
+from data_collection import *
+from datetime import datetime, timedelta
+from base import Syslog
+from sqlalchemy import or_, and_
+import click
+from packaging import version
+import pytz
+from channels import *
+from general import *
+import salt.client
+import smtools
+import xmlrpc.client
+import csv
+
+def main():
+    now = datetime.now()
+    month_year = now.strftime("%b %Y")
+    session = Session()
+    local = salt.client.LocalClient()
+
+    @click.group('cli')
+    def cli():
+        pass
+
+    @click.group('channels')
+    def channels():
+        pass
+    @channels.command('list-subscribed')
+    @click.argument('filter', required=False)
+    @click.argument('target')
+    def list_subscribed(target, filter):
+        '''
+        \b
+        Utility for listing subscribed channels
+        \b
+        available filters:
+            \b
+            - base  -> will list current base channel
+            - child -> will list current child channels
+        \b
+        Examples
+            \b
+            opsctl list-subscribed base lin9675359
+            opsctl list-subscribed child lin9675359
+        '''
+        try:
+            (client,session)=smtools.suman_login()
+            subscribed_base_channel = get_subscribed_base_channel(target)
+            subscribed_child_channels = get_subscribed_child_channels(target)
+        except:
+            print(f'{target} have no access to suse-mgr')
+
+        if filter == 'child':
+            for child in subscribed_child_channels:
+                print(child)
+        elif filter == 'base':
+            print(subscribed_base_channel)
+        else:
+            print('Provided filter is not available, check opsctl list-subscribed --help')
+    
+    @channels.command('list-subscribable')
+    @click.argument('filter', required=False)
+    @click.argument('target')
+    def list_subscribable(target, filter):
+        '''
+        \b
+        Utility for listing subscribable channels:
+        \b
+        available filters:
+            \b
+            - base  -> will list all available base channels
+            - child -> will list all available child channels
+        \b
+        Examples:
+            \b
+            opsctl channels list-subscribable base lin9675359
+            opsctl channels list-subscribable child lin9675359
+        '''
+        try:
+            (client,session)=smtools.suman_login()
+            subscribable_base_channels = get_subscribable_base_channels(target)
+            subscribable_child_channels = get_subscribable_child_channels(target)
+        except:
+            print(f'{target} have no access to suse-mgr')
+        if filter == 'base':
+            for base in subscribable_base_channels:
+                print(base)
+        elif filter == 'child':
+            for child in subscribable_child_channels:
+                print(child)
+        else:
+            print('Provided filter is not available, check opsctl list-subscribable --help')
+
+        
+    @channels.command('subscribe')
+    @click.argument('action', required=False, nargs=2)
+    @click.argument('target')
+    def subscribe(target, action):
+        '''
+        \b
+        Utility to subscribe arbitrary base or child channel
+        \b
+        Available options:
+            \b
+            - base      -> will subscribe given base channel
+            - child     -> will subscribe all child channels matching the given tag 
+            - base auto -> will detect and subscribe base channel based on system OS version 
+        \b
+        Examples:
+            \b
+            opsctl channels subscribe base sles15sp2 lin9675359
+            opsctl channels subscribe child fdom lin9675359
+            opsctl channels subscribe auto base lin9675359
+        '''
+        try:
+            (client,session)=smtools.suman_login()
+        except:
+            print(f'{target} have no access to suse-mgr')
+        
+        if action[0] == 'base':
+            try:
+                set_base_channel(target, action[1])
+                print(f'{action[1]} has been subscribed to {target}')
+            except:
+                print('{filter} cannot be subscribed to {target}')
+        elif action[0] == 'child':
+            subscribed_base_channel = get_subscribed_base_channel(target)
+            set_child_channels(target, [])
+            subscribable_child_channels = get_subscribable_child_channels(target)
+            target_child_channels = get_target_child_channels(subscribable_child_channels,
+                    subscribed_base_channel, action[1])
+            set_child_channels(target, target_child_channels)
+            print('The new child channels are:')
+            for channel in get_subscribed_child_channels(target):
+                print(channel)
+        elif action[0] == 'auto' and action[1] == 'base':
+            try:
+                os = get_system_os_version(local, target)
+            except:
+                os = get_system_os_ssh(target)
+
+            subscribed_base_channel = get_subscribed_base_channel(target)
+            correct_base_channel = get_correct_base_channel(os, subscribed_base_channel)
+            if subscribed_base_channel != correct_base_channel:
+                try:
+                    set_base_channel(target, correct_base_channel)
+                    print(f'{correct_base_channel} has been subscribed to {target}')
+                except:
+                    print(f'{correct_base_channel} cannot be attached')
+            else:
+                print('Current subsribed base channel is correct')
+        else:
+            print('Provided option is not available, check opsctl subscribe --help')
+
+            
+
+    @click.group('collect')
+    def collect():
+        pass
+    #Collect data for all kind of reports 
+    @collect.command('aix-inventory')
+    def aix_inventory():
+        '''
+        Collect customer requested aix data and send it list of recipient 
+        '''
+        collect_aix_data()
+        sendEmail('/opt/susemgr-scripts/reports/aix_vio_weekly_data.csv',
+                'aix_vio_report','ivayloa@dxc.com tihomir.nikolov@dxc.com beate.brueggemann@basf.com lothar.fendel@basf.com')
+
+    @collect.command('syslog-inventory')
+    def collect_syslog_inventory():
+        '''
+        Collect complience data for remote syslog
+        '''
+        try:
+            syslog_objs = rsyslog_server_data()
+            session.bulk_insert_mappings(Syslog,syslog_objs)
+            session.commit()
+            session.close()
+        except:
+            print('syslog inventory failed')
+    @collect.command('system-inventory')
+    def collect_system_inventory():
+        '''
+        Collect system details and upload them in lxinfra02 DB 
+        '''
+        try:
+            unix_objs = collect_unix_data()
+            linux_objs = salt_collected_data()
+            session.bulk_update_mappings(Server,unix_objs)
+            session.bulk_update_mappings(Server,linux_objs)
+            session.commit()
+            session.close()
+        except:
+            print('inventory collection failed')
+    @collect.command('ssh-status')
+    def ssh_status():
+        try:
+            ssh_status_objs = ssh_status_list()
+            session.bulk_update_mappings(Server,ssh_status_objs)
+            session.commit()
+            session.close()
+        except:
+            print('ssh status inventory failed')
+    @collect.command('upgradable-pkgs')
+    def upgradable_pks():
+        '''
+        Collect upgradable packages for each Linux system
+        '''
+        try:
+            package_objs, kernel_objs = collect_fdom()
+            session.bulk_insert_mappings(Package,package_objs)
+            session.bulk_update_mappings(Server, kernel_objs)
+            session.commit()
+            session.close()
+        except:
+            print('collecting upgradable packages has failed')
+    @collect.command('upgraded-pkgs')
+    def upgraded_pkgs():
+        '''
+        Collect upgraded packages for each Linux system
+        '''
+        try:
+            pkg_objs = collect_ldom()
+            session.bulk_update_mappings(Package, pkg_objs)
+            session.commit()
+            session.close()
+        except:
+            print('collecting upgraded packages has failed')
+
+    # Present reporting data 
+    @click.group('report')
+    def report():
+        pass
+
+    @report.command('server-inventory')
+    @click.argument('filter', required=False)
+    def server_inventory(filter):
+        '''
+        \b
+        ssh-connection provides csv formatted output containing:
+            - hostname
+            - fqdn
+            - persid
+            - os type
+            - os release
+            \b
+            Available filters:
+                - no filter -> will print the whole *nix inventory
+                - ssh-up/ssh-down -> will output servers with coresponding ssh status
+                - minion-up/minion-down -> will output servers with coresponding minion status
+                - sap/non-sap -> will output servers that are or are not with SUSE-SAP OS
+            \b
+            example:
+                opsctl server-inventory
+                opsctl server-inventory sap
+                opsctl server-inventory minion-down
+        '''
+        os_q_set = session.query(Server).filter(Server.month_year == month_year)
+        if filter == 'csv':
+             with open('/opt/susemgr-scripts/reports/os-report.csv', mode='w') as os_report:
+                 os_wtiter = csv.writer(os_report, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                 os_wtiter.writerow(['CI', 'FQDN', 'PERS_ID', 'OS-Type', 'OS-Release'])
+                 for server in os_q_set:
+                     os_wtiter.writerow([server.name, server.fqdn, server.persid, server.os_type, server.os_release])
+             sendEmail('/opt/susemgr-scripts/reports/os-report.csv',
+                                    'os-report','ivayloa@dxc.com ivan.rusev@dxc.com nasiri.bouyardan@dxc.com michael.klug@dxc.com mnikolova20@dxc.com')
+        for server in os_q_set:
+            res = f" {server.name},{server.fqdn},{server.persid},{server.os_type},{server.os_release}"
+            if not filter:
+                print(res)
+            elif filter == 'sap':
+                if server.is_sap:
+                    print(res)
+            elif filter == 'non-sap':
+                if not server.is_sap:
+                    print(res)
+            elif filter == 'ssh-up':
+                if server.ssh_status:
+                    print(res)
+            elif filter == 'ssh-down':
+                if not server.ssh_status:
+                    print(res)
+            elif filter == 'minion-up':
+                if server.minion_status == 'Up':
+                    print(res)
+            elif filter == 'minion-down':
+                if server.minion_status == 'Down':
+                    print(res)
+            elif filter == 'csv':
+                pass
+            else:
+                print('Provided filter is not available, check opsctl server-inventory --help')
+
+    
+    @report.command('syslog-inventory')
+    @click.argument('filter', required=False)
+    def syslog_inventory(filter):
+        '''
+        \b
+        syslog-inventory provides csv formatted output containing:
+            - hostname
+            - configured server 1
+            - configured server 2
+            - syslog port status
+        '''
+
+        syslog_q_set = session.query(Server).filter(Server.month_year == month_year)
+        if not filter:
+            for server in syslog_q_set:
+                q = session.query(Syslog).filter(Syslog.server_id == server.id)
+                for conf in q:
+                    print(f'{server.name},{conf.syslog_srv_1},{conf.syslog_srv_2},{conf.port_514}')
+        elif filter == 'csv':
+            with open('/opt/susemgr-scripts/reports/syslog-report.csv', mode='w') as syslog_report:
+                syslog_wtiter = csv.writer(syslog_report, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                syslog_wtiter.writerow(['CI', 'FQDN', 'PERS_ID', 'OS-Type', 'OS-Release'])
+                for server in syslog_q_set:
+                    q = session.query(Syslog).filter(Syslog.server_id == server.id)
+                    for conf in q:
+                        syslog_wtiter.writerow([server.name, conf.syslog_srv_1, conf.syslog_srv_2, conf.port_514])
+            sendEmail('/opt/susemgr-scripts/reports/syslog-report.csv',
+                                    'syslog-report','ivayloa@dxc.com ivan.rusev@dxc.com nasiri.bouyardan@dxc.com michael.klug@dxc.com mnikolova20@dxc.com')
+        else:
+            print('Provided filter is not available, check opsctl server-inventory --help')
+    
+    @report.command('gxp-inventory')
+    def gxp_inventory():
+        '''
+        \b
+        gxp-inventory provides csv formatted list of servers which are GXP regulated
+        '''
+        gxp_q_set = session.query(Server).filter(and_(Server.month_year == month_year, 
+            or_(Server.isfda == True, Server.isfrc == True)))
+        for server in gxp_q_set:
+            print(f"{server.name},fda:{server.isfda},frc:{server.isfrc}")
+
+
+    @report.command('patch-plan')
+    @click.argument('filter', required=False)
+    def patch_plan(filter):
+        '''
+        Patch plan provides csv formatted output containing packages for upgrain in current month
+        '''
+        server_objs = session.query(Package).order_by(Package.server_id).join(Server).filter(Server.month_year == month_year, Server.os_type == 'Linux')
+        if not filter:
+            print("CI_NAME,OS_VERSION,PACKAGE_NAME,TARGET_VERSION")
+            for srv_obj in server_objs:
+                print(f"{srv_obj.ops_server.name},{srv_obj.ops_server.os_release},{srv_obj.name},{srv_obj.upgradable_version}")
+        elif filter == 'csv':
+            with open('/opt/susemgr-scripts/reports/patch-plan-report.csv', mode='w') as patch_plan_report:
+                patch_plan_wtiter = csv.writer(patch_plan_report, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                patch_plan_wtiter.writerow(['CI', 'OS_VERSION', 'PACKAGE_NAME', 'TARGET_VERSION'])
+                for srv_obj in server_objs:
+                    patch_plan_wtiter.writerow([srv_obj.ops_server.name, srv_obj.ops_server.os_release, srv_obj.name, srv_obj.upgradable_version])
+                sendEmail('/opt/susemgr-scripts/reports/patch-plan-report.csv',
+                                                            'patch-plan-report','mnikolova20@dxc.com doroteya.kuncheva@dxc.com')
+        else:
+            print('Provided filter is not available, check opsctl server-inventory --help')
+    @report.command('patch-result')
+    @click.argument('filter', required=False)
+    def patch_result(filter):
+        '''
+        Patch result is the complete monthly patching report
+        '''
+        server_objs = session.query(Package).order_by(Package.server_id).join(Server).filter(Server.month_year == month_year, Server.os_type == 'Linux')
+        if not filter:
+            print("CI_NAME,OPS_WINDOW,OS_VERSION,PACKAGE_NAME,CURRENT_VERSION,TARGET_VERSION,EXCEPTION,STATUS")
+            for srv_obj in server_objs:
+                if version.parse(srv_obj.current_version) == version.parse(srv_obj.upgradable_version):
+                    patched = 'patched'
+                else:
+                    if srv_obj.current_version and srv_obj.upgradable_version:
+                        if version.parse(srv_obj.current_version) < version.parse(srv_obj.upgradable_version):
+                            patched = 'not patched'
+                        else:
+                            patched = 'over patched'
+                    else:
+                        patched = ''
+                print(f"{srv_obj.ops_server.name},{srv_obj.ops_server.ops_window},{srv_obj.ops_server.os_release},{srv_obj.name},{srv_obj.current_version},{srv_obj.upgradable_version},{srv_obj.ops_server.exception},{patched}")
+        elif filter == 'csv':
+            with open('/opt/susemgr-scripts/reports/patch-report.csv', mode='w') as patch_report:
+                patch_result_wtiter = csv.writer(patch_report, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                patch_result_wtiter.writerow(['CI_NAME', 'OPS_WINDOW', 'OS_VERSION', 'PACKAGE_NAME', ',CURRENT_VERSION', 'TARGET_VERSION', 'EXCEPTION', 'STATUS'])
+                for srv_obj in server_objs:
+                    if version.parse(srv_obj.current_version) == version.parse(srv_obj.upgradable_version):
+                        patched = 'patched'
+                    else:
+                        if srv_obj.current_version and srv_obj.upgradable_version:
+                            if version.parse(srv_obj.current_version) < version.parse(srv_obj.upgradable_version):
+                                patched = 'not patched'
+                            else:
+                                patched = 'over patched'
+                        else:
+                            patched=''
+                    patch_result_wtiter.writerow([srv_obj.ops_server.name,srv_obj.ops_server.ops_window,srv_obj.ops_server.os_release,
+                        srv_obj.name,srv_obj.current_version,srv_obj.upgradable_version,srv_obj.ops_server.exception,patched])
+            sendEmail('/opt/susemgr-scripts/reports/patch-report.csv','patch-report email send test','ivayloa@dxc.com mnikolova20@dxc.com doroteya.kuncheva@dxc.com')
+        else:
+            print('Provided filter is not available, check opsctl server-inventory --help')
+    
+    @report.command('ops-today')
+    def ops_today():
+        '''
+        ops-today provides list of servers that will be patched today
+        '''
+        server_objs = session.query(Server).filter(Server.window_start == now.strftime("%Y-%m-%d %H:%M %z"))
+        for server in server_objs:
+            print(f"{server.name} {server.ops_window} {server.window_start} {server.window_end}")
+
+    @report.command('ops-calendar')
+    def ops_calendar():
+        '''
+        ops-calendar provides summary of when and now much systems will be patched
+        '''
+        from sqlalchemy import func
+        cet = pytz.timezone('CET')
+        server_objs = session.query(func.count(Server.window_start), Server.window_start).group_by(Server.window_start).order_by(Server.window_start).all()
+        for i in server_objs:
+            if i[1] and i[1].strftime("%b %Y") == month_year:
+                window = i[1] + timedelta(hours=2)
+                print(f"{window.strftime('%Y-%m-%d %H:%M')} {i[0]}")
+
+    cli.add_command(report)
+    cli.add_command(collect)
+    cli.add_command(channels)
+    cli()
+
+
+if __name__ == "__main__":
+        main()
+    
