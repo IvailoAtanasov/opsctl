@@ -53,8 +53,8 @@ def main():
         \b
         Examples
             \b
-            opsctl list-subscribed base lin9675359
-            opsctl list-subscribed child lin9675359
+            opsctl list-subscribed base <ci name>
+            opsctl list-subscribed child <ci name>
         '''
         try:
             (client,session)=smtools.suman_login()
@@ -86,8 +86,8 @@ def main():
         \b
         Examples:
             \b
-            opsctl channels list-subscribable base lin9675359
-            opsctl channels list-subscribable child lin9675359
+            opsctl channels list-subscribable base <ci name>
+            opsctl channels list-subscribable child <ci name>
         '''
         try:
             (client,session)=smtools.suman_login()
@@ -121,9 +121,9 @@ def main():
         \b
         Examples:
             \b
-            opsctl channels subscribe base sles15sp2 lin9675359
-            opsctl channels subscribe child fdom lin9675359
-            opsctl channels subscribe auto base lin9675359
+            opsctl channels subscribe base sles15sp2 <ci name>
+            opsctl channels subscribe child fdom <ci name>
+            opsctl channels subscribe auto base <ci name>
         '''
         try:
             (client,session)=smtools.suman_login()
